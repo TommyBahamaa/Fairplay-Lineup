@@ -1,0 +1,22 @@
+{
+  "name": "FairPlay Lineup Generator",
+  "short_name": "FairPlay",
+  "description": "Fair lineup generator for youth baseball & softball coaches",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0a0f1a",
+  "theme_color": "#14532d",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#14532d">
+<meta name="description" content="Fair lineup generator for youth baseball & softball coaches">
+<title>FairPlay Lineup Generator</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Black&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root {
+    height: 100%;
+    font-family: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+    background-color: #0a0f1a;
+    color: #e5e7eb;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  body { padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) 0; }
+  input, select, button { font-family: inherit; }
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+  .fade-in { animation: fadeInUp 0.25s ease; }
+  .toast-anim { animation: fadeIn 0.2s ease; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ── Storage helpers (localStorage) ──────────────────────────
+const store = {
+  get(key) { try { const v = localStorage.getItem('fp_' + key); return v ? JSON.parse(v) : null; } catch { return null; } },
+  set(key, val) { try { localStorage.setItem('fp_' + key, JSON.stringify(val)); } catch {} },
+  del(key) { try { localStorage.removeItem('fp_' + key); } catch {} },
+};
+
+const POSITIONS = ["P","C","1B","2B","3B","SS","LF","CF","RF"];
+const BENCH = "BN";
+
+// ── Fairness Engine ─────────────────────────────────────────
+function buildPlayerStats(player, history) {
+  const posCount = {};
+  POSITIONS.forEach(p => posCount[p] = 0);
+  posCount[BENCH] = 0;
+  const batSlotCount = {};
+  let batSum = 0, batN = 0;
+
+  history.forEach(game => {
+    const e = game.lineup.find(x => x.playerId === player.id);
+    if (e) {
+      posCount[e.position] = (posCount[e.position] || 0) + 1;
+      batSlotCount[e.battingOrder] = (batSlotCount[e.battingOrder] || 0) + 1;
+      batSum += e.battingOrder;
+      batN++;
+    }
+  });
+  return { posCount, batSlotCount, avgBatting: batN ? batSum / batN : 0, gamesIn: batN };
+}
+
+function generateFairLineup(activePlayers, history, numFieldPositions, gameNumber) {
+  if (activePlayers.length === 0) return null;
+
+  const positionsToFill = POSITIONS.slice(0, numFieldPositions);
+  const numActive = activePlayers.length;
+  const totalGames = history.length;
+  const stats = activePlayers.map(p => ({ player: p, ...buildPlayerStats(p, history) }));
+
+  // ── Assign field positions ──
+  const usedPlayers = new Set();
+  const assignments = [];
+
+  const posOrder = [...positionsToFill].sort((a, b) => {
+    const tA = stats.reduce((s, ps) => s + (ps.posCount[a] || 0), 0);
+    const tB = stats.reduce((s, ps) => s + (ps.posCount[b] || 0), 0);
+    return tA - tB;
+  });
+
+  for (const pos of posOrder) {
+    let best = null, bestScore = Infinity;
+    for (let i = 0; i < stats.length; i++) {
+      if (usedPlayers.has(i)) continue;
+      const score = (stats[i].posCount[pos] || 0) + Math.random() * 0.4;
+      if (score < bestScore) { bestScore = score; best = i; }
+    }
+    if (best !== null) { assignments.push({ idx: best, position: pos }); usedPlayers.add(best); }
+  }
+
+  const benchPlayers = stats.map((s, i) => ({ idx: i, position: BENCH })).filter((_, i) => !usedPlayers.has(i));
+  const allEntries = [...assignments, ...benchPlayers];
+
+  // ── Assign batting order ──
+  allEntries.sort((a, b) => {
+    const avgA = stats[a.idx].avgBatting || numActive / 2;
+    const avgB = stats[b.idx].avgBatting || numActive / 2;
+    return (avgB - avgA) + (Math.random() - 0.5) * 2.5;
+  });
+
+  for (let i = 0; i < allEntries.length; i++) {
+    const ps = stats[allEntries[i].idx];
+    const timesInSlot = ps.batSlotCount[i + 1] || 0;
+    if (timesInSlot >= Math.ceil(totalGames / numActive) + 1 && i < allEntries.length - 1) {
+      const j = Math.min(i + 1 + Math.floor(Math.random() * 2), allEntries.length - 1);
+      [allEntries[i], allEntries[j]] = [allEntries[j], allEntries[i]];
+    }
+  }
+
+  return {
+    gameNumber,
+    date: new Date().toLocaleDateString(),
+    lineup: allEntries.map((e, i) => ({
+      playerId: stats[e.idx].player.id,
+      playerName: stats[e.idx].player.name,
+      position: e.position,
+      battingOrder: i + 1,
+    })),
+  };
+}
+
+// ── Components ──────────────────────────────────────────────
+function PlayerCard({ player, onToggle, onRemove, onRename, gamesPlayed, totalGames }) {
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(player.name);
+  const finish = () => { onRename(editName.trim() || player.name); setEditing(false); };
+
+  return (
+    <div className="fade-in" style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderRadius:8, backgroundColor:'#1f2937', marginBottom:6, opacity: player.active ? 1 : 0.55, transition:'opacity 0.2s' }}>
+      <button onClick={onToggle} title={player.active ? 'Mark as out' : 'Mark as active'} style={{ width:16, height:16, borderRadius:'50%', border:'2px solid #374151', backgroundColor: player.active ? '#22c55e' : '#ef4444', cursor:'pointer', flexShrink:0, padding:0 }} />
+      <div style={{ flex:1, display:'flex', flexDirection:'column' }}>
+        {editing ? (
+          <input autoFocus value={editName} onChange={e => setEditName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') finish(); if(e.key==='Escape'){ setEditName(player.name); setEditing(false); }}} onBlur={finish}
+            style={{ padding:'2px 6px', border:'1px solid #22c55e', borderRadius:4, backgroundColor:'#111827', color:'#e5e7eb', fontSize:15, outline:'none' }} />
+        ) : (
+          <span onClick={() => { setEditName(player.name); setEditing(true); }} style={{ fontWeight:600, fontSize:15, cursor:'pointer' }}>{player.name}</span>
+        )}
+        {totalGames > 0 && <span style={{ fontSize:11, color:'#6b7280' }}>{gamesPlayed}/{totalGames} games</span>}
+      </div>
+      <button onClick={onRemove} style={{ width:28, height:28, borderRadius:6, border:'none', background:'transparent', color:'#6b7280', cursor:'pointer', fontSize:14, display:'flex', alignItems:'center', justifyContent:'center' }}>✕</button>
+    </div>
+  );
+}
+
+function LineupRow({ entry, idx, total, onSwapUp, onSwapDown, onChangePos, positions }) {
+  const [showMenu, setShowMenu] = useState(false);
+  const isBench = entry.position === BENCH;
+  return (
+    <div style={{ display:'flex', padding:'10px 12px', borderBottom:'1px solid #1a2332', alignItems:'center' }}>
+      <div style={{ width:40, flexShrink:0 }}>
+        <span style={{ display:'inline-flex', alignItems:'center', justifyContent:'center', width:26, height:26, borderRadius:6, backgroundColor:'#1f2937', fontSize:12, fontWeight:700, color:'#d1d5db' }}>{entry.battingOrder}</span>
+      </div>
+      <div style={{ flex:1, fontWeight:600, fontSize:14 }}>{entry.playerName}</div>
+      <div style={{ width:56, textAlign:'center', flexShrink:0, position:'relative' }}>
+        <button onClick={() => setShowMenu(!showMenu)} style={{ display:'inline-block', padding:'3px 10px', borderRadius:4, backgroundColor: isBench ? '#7f1d1d' : '#14532d', color: isBench ? '#fca5a5' : '#86efac', fontSize:12, fontWeight:700, border:'none', cursor:'pointer' }}>{entry.position}</button>
+        {showMenu && (
+          <div style={{ position:'absolute', top:'100%', right:0, backgroundColor:'#1f2937', border:'1px solid #374151', borderRadius:8, padding:4, zIndex:20, display:'flex', flexWrap:'wrap', gap:2, width:180, boxShadow:'0 8px 24px rgba(0,0,0,0.5)' }}>
+            {positions.map(pos => (
+              <button key={pos} onClick={() => { onChangePos(pos); setShowMenu(false); }} style={{ padding:'6px 10px', borderRadius:4, border:'none', background:'transparent', color:'#d1d5db', cursor:'pointer', fontSize:13, fontWeight: pos===entry.position ? 700 : 400 }}>{pos}</button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={{ width:36, display:'flex', flexDirection:'column', alignItems:'center', gap:2, flexShrink:0 }}>
+        <button onClick={onSwapUp} style={{ width:22, height:18, border:'none', background:'transparent', color:'#6b7280', cursor:'pointer', fontSize:10, visibility: idx===0?'hidden':'visible' }}>▲</button>
+        <button onClick={onSwapDown} style={{ width:22, height:18, border:'none', background:'transparent', color:'#6b7280', cursor:'pointer', fontSize:10, visibility: idx===total-1?'hidden':'visible' }}>▼</button>
+      </div>
+    </div>
+  );
+}
+
+// ── App ─────────────────────────────────────────────────────
+function App() {
+  const [roster, setRoster] = useState(() => store.get('roster') || []);
+  const [history, setHistory] = useState(() => store.get('history') || []);
+  const [numFieldPositions, setNumFieldPositions] = useState(() => store.get('settings')?.numFieldPositions || 9);
+  const [newName, setNewName] = useState('');
+  const [currentLineup, setCurrentLineup] = useState(null);
+  const [activeTab, setActiveTab] = useState('roster');
+  const [toast, setToast] = useState(null);
+  const [historyDetail, setHistoryDetail] = useState(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const gameNumber = history.length + 1;
+  const activePlayers = roster.filter(p => p.active);
+  const inactivePlayers = roster.filter(p => !p.active);
+
+  const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+
+  const saveRoster = r => { setRoster(r); store.set('roster', r); };
+  const saveHistory = h => { setHistory(h); store.set('history', h); };
+  const saveSettings = s => { setNumFieldPositions(s.numFieldPositions); store.set('settings', s); };
+
+  const addPlayer = () => {
+    const name = newName.trim();
+    if (!name) return;
+    if (roster.find(p => p.name.toLowerCase() === name.toLowerCase())) { showToast('Player already on roster'); return; }
+    saveRoster([...roster, { id: Date.now().toString(36) + Math.random().toString(36).slice(2,6), name, active: true }]);
+    setNewName('');
+  };
+
+  const generate = () => {
+    const result = generateFairLineup(activePlayers, history, numFieldPositions, gameNumber);
+    if (!result) { showToast('No active players'); return; }
+    setCurrentLineup(result);
+    setActiveTab('lineup');
+  };
+
+  const confirmLineup = () => {
+    if (!currentLineup) return;
+    saveHistory([...history, currentLineup]);
+    setCurrentLineup(null);
+    showToast(`Game ${currentLineup.gameNumber} lineup saved!`);
+    setActiveTab('roster');
+  };
+
+  const swapPlayers = (i, j) => {
+    if (!currentLineup) return;
+    const L = [...currentLineup.lineup];
+    const tmpBat = L[i].battingOrder;
+    L[i] = { ...L[i], battingOrder: L[j].battingOrder };
+    L[j] = { ...L[j], battingOrder: tmpBat };
+    [L[i], L[j]] = [L[j], L[i]];
+    setCurrentLineup({ ...currentLineup, lineup: L });
+  };
+
+  const swapPos = (idx, newPos) => {
+    if (!currentLineup) return;
+    const L = [...currentLineup.lineup];
+    const other = L.findIndex((e,i) => i !== idx && e.position === newPos);
+    if (other !== -1) L[other] = { ...L[other], position: L[idx].position };
+    L[idx] = { ...L[idx], position: newPos };
+    setCurrentLineup({ ...currentLineup, lineup: L });
+  };
+
+  const clearAll = () => {
+    saveRoster([]); saveHistory([]); setCurrentLineup(null); setConfirmClear(false);
+    store.del('roster'); store.del('history'); store.del('settings');
+    showToast('All data cleared');
+  };
+
+  // ── Render ──
+  const tabs = [
+    { key:'roster', label:'Roster', icon:'👥' },
+    { key:'lineup', label:'Lineup', icon:'📋' },
+    { key:'stats', label:'Fairness', icon:'📊' },
+    { key:'history', label:'History', icon:'📚' },
+  ];
+
+  return (
+    <div style={{ maxWidth:520, margin:'0 auto', minHeight:'100vh', position:'relative' }}>
+      {/* Header */}
+      <div style={{ background:'linear-gradient(135deg,#14532d 0%,#0f3422 50%,#0a2618 100%)', padding:'20px 20px 16px', borderBottom:'1px solid #166534' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+            <span style={{ fontSize:36 }}>⚾</span>
+            <div>
+              <h1 style={{ fontSize:22, fontWeight:900, letterSpacing:'-0.5px', color:'#fff', fontFamily:"'Archivo Black','Archivo',sans-serif" }}>FairPlay</h1>
+              <p style={{ fontSize:12, color:'#86efac', letterSpacing:'2px', textTransform:'uppercase', fontWeight:500 }}>Lineup Generator</p>
+            </div>
+          </div>
+          <div style={{ backgroundColor:'#166534', color:'#bbf7d0', padding:'4px 12px', borderRadius:20, fontSize:13, fontWeight:700 }}>Game #{gameNumber}</div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display:'flex', backgroundColor:'#111827', borderBottom:'1px solid #1f2937', position:'sticky', top:0, zIndex:10 }}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => { setActiveTab(t.key); setHistoryDetail(null); }}
+            style={{ flex:1, padding:'10px 4px', border:'none', background:'transparent', color: activeTab===t.key ? '#22c55e' : '#6b7280', cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:2, borderBottom: activeTab===t.key ? '2px solid #22c55e' : '2px solid transparent', transition:'all 0.2s' }}>
+            <span style={{ fontSize:18 }}>{t.icon}</span>
+            <span style={{ fontSize:11, fontWeight:600, textTransform:'uppercase', letterSpacing:'0.5px' }}>{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding:'16px 16px 80px' }}>
+
+        {/* ═══ ROSTER ═══ */}
+        {activeTab === 'roster' && (
+          <div className="fade-in">
+            <div style={{ display:'flex', gap:8, marginBottom:20 }}>
+              <input value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key==='Enter' && addPlayer()} placeholder="Add player name..."
+                style={{ flex:1, padding:'10px 14px', borderRadius:8, border:'1px solid #374151', backgroundColor:'#1f2937', color:'#e5e7eb', fontSize:15, outline:'none' }} />
+              <button onClick={addPlayer} style={{ padding:'10px 18px', borderRadius:8, border:'none', backgroundColor:'#16a34a', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:14, whiteSpace:'nowrap' }}>+ Add</button>
+            </div>
+
+            <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, fontWeight:700, color:'#9ca3af', textTransform:'uppercase', letterSpacing:'1px', marginBottom:8 }}>
+              <span style={{ width:8, height:8, borderRadius:'50%', backgroundColor:'#22c55e', display:'inline-block' }} />
+              Active ({activePlayers.length})
+            </div>
+            {activePlayers.length === 0 && <div style={{ textAlign:'center', color:'#6b7280', padding:'32px 16px', fontSize:14 }}>Add players above to get started</div>}
+            {activePlayers.map(p => (
+              <PlayerCard key={p.id} player={p}
+                onToggle={() => saveRoster(roster.map(x => x.id===p.id ? {...x, active:!x.active} : x))}
+                onRemove={() => saveRoster(roster.filter(x => x.id !== p.id))}
+                onRename={n => saveRoster(roster.map(x => x.id===p.id ? {...x, name:n} : x))}
+                gamesPlayed={history.filter(g => g.lineup.find(e => e.playerId === p.id)).length}
+                totalGames={history.length} />
+            ))}
+
+            {inactivePlayers.length > 0 && (
+              <>
+                <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, fontWeight:700, color:'#9ca3af', textTransform:'uppercase', letterSpacing:'1px', marginBottom:8, marginTop:24 }}>
+                  <span style={{ width:8, height:8, borderRadius:'50%', backgroundColor:'#ef4444', display:'inline-block' }} />
+                  Out / Absent ({inactivePlayers.length})
+                </div>
+                {inactivePlayers.map(p => (
+                  <PlayerCard key={p.id} player={p}
+                    onToggle={() => saveRoster(roster.map(x => x.id===p.id ? {...x, active:!x.active} : x))}
+                    onRemove={() => saveRoster(roster.filter(x => x.id !== p.id))}
+                    onRename={n => saveRoster(roster.map(x => x.id===p.id ? {...x, name:n} : x))}
+                    gamesPlayed={history.filter(g => g.lineup.find(e => e.playerId === p.id)).length}
+                    totalGames={history.length} />
+                ))}
+              </>
+            )}
+
+            {/* Settings */}
+            <div style={{ marginTop:32, padding:16, borderRadius:10, border:'1px solid #1f2937', backgroundColor:'#111827' }}>
+              <div style={{ fontWeight:700, marginBottom:12 }}>⚙️ Settings</div>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+                <label style={{ fontSize:14, color:'#d1d5db' }}>Field positions per game</label>
+                <select value={numFieldPositions} onChange={e => saveSettings({ numFieldPositions: parseInt(e.target.value) })}
+                  style={{ padding:'6px 10px', borderRadius:6, border:'1px solid #374151', backgroundColor:'#1f2937', color:'#e5e7eb', fontSize:14 }}>
+                  {[6,7,8,9,10].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <button onClick={() => setConfirmClear(true)} style={{ padding:'8px 14px', borderRadius:6, border:'1px solid #7f1d1d', background:'transparent', color:'#fca5a5', cursor:'pointer', fontSize:13, fontWeight:600 }}>Reset All Data</button>
+              {confirmClear && (
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:10, flexWrap:'wrap' }}>
+                  <span style={{ fontSize:13, color:'#fca5a5' }}>This cannot be undone.</span>
+                  <button onClick={clearAll} style={{ padding:'4px 12px', borderRadius:4, border:'none', backgroundColor:'#dc2626', color:'#fff', fontSize:12, fontWeight:700, cursor:'pointer' }}>Yes, clear</button>
+                  <button onClick={() => setConfirmClear(false)} style={{ padding:'4px 12px', borderRadius:4, border:'1px solid #374151', background:'transparent', color:'#9ca3af', fontSize:12, cursor:'pointer' }}>Cancel</button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ LINEUP ═══ */}
+        {activeTab === 'lineup' && (
+          <div className="fade-in">
+            {!currentLineup ? (
+              <div style={{ display:'flex', flexDirection:'column', alignItems:'center', textAlign:'center', padding:'40px 16px' }}>
+                <div style={{ fontSize:56, marginBottom:8 }}>🎲</div>
+                <h2 style={{ fontSize:20, fontWeight:800, color:'#fff', marginBottom:8 }}>Generate Game #{gameNumber} Lineup</h2>
+                <p style={{ fontSize:14, color:'#9ca3af', marginBottom:4 }}>{activePlayers.length} active player{activePlayers.length!==1?'s':''} • {inactivePlayers.length} sitting out</p>
+                {history.length > 0 && <p style={{ fontSize:12, color:'#86efac', fontStyle:'italic', marginBottom:24 }}>Fairness engine balancing across {history.length} prior game{history.length!==1?'s':''}</p>}
+                <button onClick={generate} disabled={activePlayers.length===0}
+                  style={{ padding:'14px 36px', borderRadius:10, border:'none', background:'linear-gradient(135deg,#16a34a,#15803d)', color:'#fff', fontSize:16, fontWeight:800, cursor:'pointer', boxShadow:'0 4px 20px rgba(22,163,74,0.3)', opacity: activePlayers.length===0 ? 0.4 : 1 }}>
+                  Generate Fair Lineup
+                </button>
+              </div>
+            ) : (
+              <div>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                  <h2 style={{ fontSize:18, fontWeight:800, color:'#fff' }}>Game #{currentLineup.gameNumber}</h2>
+                  <span style={{ fontSize:13, color:'#6b7280' }}>{currentLineup.date}</span>
+                </div>
+                <p style={{ fontSize:12, color:'#6b7280', marginBottom:12 }}>Tap position to change • Arrows to reorder batting</p>
+                <div style={{ borderRadius:10, border:'1px solid #1f2937', overflow:'hidden', backgroundColor:'#111827' }}>
+                  <div style={{ display:'flex', padding:'8px 12px', backgroundColor:'#0d1117', borderBottom:'1px solid #1f2937', fontSize:11, fontWeight:700, color:'#6b7280', textTransform:'uppercase', letterSpacing:'1px' }}>
+                    <div style={{ width:40, flexShrink:0 }}>#</div>
+                    <div style={{ flex:1 }}>Player</div>
+                    <div style={{ width:56, textAlign:'center', flexShrink:0 }}>Pos</div>
+                    <div style={{ width:36, flexShrink:0 }}></div>
+                  </div>
+                  {currentLineup.lineup.map((entry, idx) => (
+                    <LineupRow key={entry.playerId} entry={entry} idx={idx} total={currentLineup.lineup.length}
+                      onSwapUp={() => swapPlayers(idx, idx-1)}
+                      onSwapDown={() => swapPlayers(idx, idx+1)}
+                      onChangePos={pos => swapPos(idx, pos)}
+                      positions={[...POSITIONS.slice(0, numFieldPositions), BENCH]} />
+                  ))}
+                </div>
+                <div style={{ display:'flex', gap:10, marginTop:16, justifyContent:'center' }}>
+                  <button onClick={generate} style={{ padding:'10px 20px', borderRadius:8, border:'1px solid #374151', backgroundColor:'#1f2937', color:'#d1d5db', cursor:'pointer', fontWeight:600, fontSize:14 }}>🔄 Re-generate</button>
+                  <button onClick={confirmLineup} style={{ padding:'10px 24px', borderRadius:8, border:'none', backgroundColor:'#16a34a', color:'#fff', cursor:'pointer', fontWeight:700, fontSize:14 }}>✅ Lock In Lineup</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ STATS ═══ */}
+        {activeTab === 'stats' && (
+          <div className="fade-in">
+            <h2 style={{ fontSize:18, fontWeight:800, color:'#fff', marginBottom:12 }}>Fairness Dashboard</h2>
+            {history.length === 0 ? (
+              <div style={{ textAlign:'center', color:'#6b7280', padding:'32px 16px', fontSize:14 }}>Save your first lineup to see fairness stats</div>
+            ) : (
+              <div>
+                <div style={{ fontSize:13, color:'#6b7280', marginBottom:16 }}>{history.length} game{history.length!==1?'s':''} tracked • {roster.length} player{roster.length!==1?'s':''}</div>
+                {roster.map(player => {
+                  const stats = buildPlayerStats(player, history);
+                  return (
+                    <div key={player.id} style={{ padding:14, borderRadius:10, backgroundColor:'#111827', border:'1px solid #1f2937', marginBottom:10 }}>
+                      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
+                        <span style={{ fontWeight:700, fontSize:15, color:'#fff' }}>{player.name}</span>
+                        <span style={{ fontSize:12, color:'#6b7280' }}>{stats.gamesIn}/{history.length} games</span>
+                      </div>
+                      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
+                        <span style={{ fontSize:12, color:'#9ca3af' }}>Avg Batting Pos:</span>
+                        <span style={{ fontSize:14, fontWeight:700, color:'#86efac' }}>{stats.gamesIn > 0 ? stats.avgBatting.toFixed(1) : '—'}</span>
+                      </div>
+                      <div style={{ fontSize:12, color:'#9ca3af', marginBottom:4 }}>Positions Played:</div>
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:10 }}>
+                        {[...POSITIONS.slice(0, numFieldPositions), BENCH].map(pos => (
+                          <div key={pos} style={{ display:'flex', alignItems:'center', gap:4, width:'calc(50% - 4px)' }}>
+                            <span style={{ fontSize:11, fontWeight:700, width:24, color: pos===BENCH ? '#fca5a5' : '#86efac', flexShrink:0 }}>{pos}</span>
+                            <div style={{ flex:1, height:6, backgroundColor:'#1f2937', borderRadius:3, overflow:'hidden' }}>
+                              <div style={{ height:'100%', backgroundColor: pos===BENCH ? '#ef4444' : '#22c55e', borderRadius:3, width: `${Math.min(100, ((stats.posCount[pos]||0)/(history.length||1))*100)}%`, transition:'width 0.3s' }} />
+                            </div>
+                            <span style={{ fontSize:11, color:'#6b7280', width:16, textAlign:'right', flexShrink:0 }}>{stats.posCount[pos]||0}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ fontSize:12, color:'#9ca3af', marginBottom:4 }}>Batting Slots:</div>
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
+                        {Object.keys(stats.batSlotCount).sort((a,b) => a-b).map(slot => (
+                          <span key={slot} style={{ padding:'2px 8px', borderRadius:4, backgroundColor:'#1f2937', fontSize:11, color:'#d1d5db' }}>#{slot}: {stats.batSlotCount[slot]}x</span>
+                        ))}
+                        {Object.keys(stats.batSlotCount).length === 0 && <span style={{ fontSize:12, color:'#6b7280' }}>No data yet</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ HISTORY ═══ */}
+        {activeTab === 'history' && (
+          <div className="fade-in">
+            <h2 style={{ fontSize:18, fontWeight:800, color:'#fff', marginBottom:12 }}>Game History</h2>
+            {history.length === 0 ? (
+              <div style={{ textAlign:'center', color:'#6b7280', padding:'32px 16px', fontSize:14 }}>No lineups saved yet</div>
+            ) : historyDetail !== null ? (
+              <div>
+                <button onClick={() => setHistoryDetail(null)} style={{ padding:'6px 14px', borderRadius:6, border:'1px solid #374151', background:'transparent', color:'#9ca3af', cursor:'pointer', fontSize:13, marginBottom:12 }}>← Back</button>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                  <h2 style={{ fontSize:18, fontWeight:800, color:'#fff' }}>Game #{history[historyDetail].gameNumber}</h2>
+                  <span style={{ fontSize:13, color:'#6b7280' }}>{history[historyDetail].date}</span>
+                </div>
+                <div style={{ borderRadius:10, border:'1px solid #1f2937', overflow:'hidden', backgroundColor:'#111827' }}>
+                  <div style={{ display:'flex', padding:'8px 12px', backgroundColor:'#0d1117', borderBottom:'1px solid #1f2937', fontSize:11, fontWeight:700, color:'#6b7280', textTransform:'uppercase', letterSpacing:'1px' }}>
+                    <div style={{ width:40, flexShrink:0 }}>#</div>
+                    <div style={{ flex:1 }}>Player</div>
+                    <div style={{ width:56, textAlign:'center', flexShrink:0 }}>Pos</div>
+                  </div>
+                  {history[historyDetail].lineup.map(entry => (
+                    <div key={entry.playerId} style={{ display:'flex', padding:'10px 12px', borderBottom:'1px solid #1a2332', alignItems:'center' }}>
+                      <div style={{ width:40, flexShrink:0 }}>
+                        <span style={{ display:'inline-flex', alignItems:'center', justifyContent:'center', width:26, height:26, borderRadius:6, backgroundColor:'#1f2937', fontSize:12, fontWeight:700, color:'#d1d5db' }}>{entry.battingOrder}</span>
+                      </div>
+                      <div style={{ flex:1, fontWeight:600, fontSize:14 }}>{entry.playerName}</div>
+                      <div style={{ width:56, textAlign:'center', flexShrink:0 }}>
+                        <span style={{ display:'inline-block', padding:'3px 10px', borderRadius:4, backgroundColor: entry.position===BENCH ? '#7f1d1d' : '#14532d', color: entry.position===BENCH ? '#fca5a5' : '#86efac', fontSize:12, fontWeight:700 }}>{entry.position}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div>
+                {[...history].reverse().map((game, ri) => {
+                  const idx = history.length - 1 - ri;
+                  return (
+                    <button key={idx} onClick={() => setHistoryDetail(idx)}
+                      style={{ display:'flex', justifyContent:'space-between', alignItems:'center', width:'100%', padding:'12px 14px', borderRadius:8, backgroundColor:'#1f2937', border:'1px solid #2d3748', marginBottom:6, cursor:'pointer', color:'#e5e7eb', textAlign:'left' }}>
+                      <div style={{ display:'flex', flexDirection:'column' }}>
+                        <span style={{ fontWeight:700, fontSize:14 }}>Game #{game.gameNumber}</span>
+                        <span style={{ fontSize:12, color:'#6b7280' }}>{game.date}</span>
+                      </div>
+                      <div style={{ fontSize:13, color:'#6b7280' }}>{game.lineup.length} players →</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Toast */}
+      {toast && <div className="toast-anim" style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)', backgroundColor:'#16a34a', color:'#fff', padding:'10px 24px', borderRadius:10, fontSize:14, fontWeight:600, zIndex:100, boxShadow:'0 4px 16px rgba(0,0,0,0.4)' }}>{toast}</div>}
+    </div>
+  );
+}
+
+// ── Mount ──
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+// ── Register Service Worker ──
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>

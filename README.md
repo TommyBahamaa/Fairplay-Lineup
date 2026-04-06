@@ -15,7 +15,7 @@ A free, mobile-friendly lineup generator for youth baseball and softball coaches
 ## How to Use
 
 ### Option 1: Use the hosted version
-Visit: **https://TommyBahamaa.github.io/fairplay-lineup**
+Visit: **https://TommyBahamaa.github.io/Fairplay-Lineup**
 
 ### Option 2: Host it yourself
 1. Fork this repo
